@@ -7,20 +7,18 @@ import tqdm
 import tensorflow_datasets as tfds
 import numpy as np
 import torch
-import torch.optim as optim
-from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 
 # constants
 
 NUM_BATCHES = int(1e5)
-BATCH_SIZE = 4
-GRADIENT_ACCUMULATE_EVERY = 4
+BATCH_SIZE = 8
+GRADIENT_ACCUMULATE_EVERY = 2
 LEARNING_RATE = 2e-4
 VALIDATE_EVERY = 100
 GENERATE_EVERY = 500
 GENERATE_LENGTH = 512
-SEQ_LEN = 512
+SEQ_LEN = 192
 
 
 # helpers
@@ -45,9 +43,10 @@ if __name__ == '__main__':
         num_tokens=256,
         dim=512,
         max_seq_len=SEQ_LEN,
-        depth=(4, 2, 4),
-        shorten_factor=2,
-        heads=8
+        depth=(1, 2, 1),
+        shorten_factor=3,
+        heads=8,
+        attn_resampling=False
     )
 
     model = AutoregressiveWrapper(model)
@@ -100,12 +99,12 @@ if __name__ == '__main__':
             loss = model(next(train_loader))
             loss.backward()
 
-        print(f'training loss: {loss.item()}')
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optim.step()
         optim.zero_grad()
 
         if i % VALIDATE_EVERY == 0:
+            print(f'training loss: {loss.item()}')
             model.eval()
             with torch.no_grad():
                 loss = model(next(val_loader))
