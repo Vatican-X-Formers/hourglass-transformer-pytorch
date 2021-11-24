@@ -22,7 +22,6 @@ VALIDATE_EVERY = 100
 GENERATE_EVERY = 1000
 GENERATE_LENGTH = 192
 SEQ_LEN = 192
-VAL_STEPS = 30
 use_rotary = True
 sf_dropout = False
 
@@ -42,7 +41,6 @@ if USE_NEPTUNE:
 
 params = {"bs": BATCH_SIZE,
           "grad_acc": GRADIENT_ACCUMULATE_EVERY,
-          "val_steps": VAL_STEPS,
           "lr": LEARNING_RATE,
           "seq_len": SEQ_LEN,
           "model_hierarchy": hierarchy,
@@ -119,7 +117,7 @@ if __name__ == '__main__':
     train_dataset = TextSamplerDataset(data_train, SEQ_LEN)
     val_dataset = TextSamplerDataset(data_val, SEQ_LEN)
     train_loader = cycle(DataLoader(train_dataset, batch_size=BATCH_SIZE))
-    val_loader = cycle(DataLoader(val_dataset, batch_size=BATCH_SIZE))
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
     # optimizer
 
@@ -145,8 +143,8 @@ if __name__ == '__main__':
 
         if i % VALIDATE_EVERY == 0:
             val_losses = []
-            for _ in range(VAL_STEPS):
-                loss = model(next(val_loader))
+            for val_batch in val_loader:
+                loss = model(val_batch)
                 val_losses.append(loss.item())
             val_loss = np.mean(np.array(val_losses))
             print(f'validation loss: {val_loss}')
