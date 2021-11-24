@@ -16,7 +16,8 @@ setup(
   ],
   install_requires=[
     'einops',
-    'torch>=1.6'
+    'torch>=1.6',
+    'rotary-embedding-torch',
   ],
   classifiers=[
     'Development Status :: 4 - Beta',

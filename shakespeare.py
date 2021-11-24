@@ -23,6 +23,7 @@ GENERATE_EVERY = 1000
 GENERATE_LENGTH = 192
 SEQ_LEN = 192
 VAL_STEPS = 30
+use_rotary = True
 sf_dropout = False
 
 hierarchy = (1, 2, 1)
@@ -49,6 +50,7 @@ params = {"bs": BATCH_SIZE,
           "d_model": d_model,
           "n_heads": n_heads,
           "attn_resampling": attn_resampling,
+          "use_rotary": use_rotary,
           "sf_dropout": sf_dropout}
 
 if USE_NEPTUNE:
@@ -79,6 +81,7 @@ if __name__ == '__main__':
         shorten_factor=shorten_factor,
         heads=n_heads,
         attn_resampling=attn_resampling,
+        use_rotary=use_rotary,
     )
 
     model = AutoregressiveWrapper(model)
