@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 from hourglass_transformer_pytorch import HourglassTransformerLM
 from hourglass_transformer_pytorch.autoregressive_wrapper import \
     AutoregressiveWrapper
@@ -15,7 +17,7 @@ import neptune.new as neptune
 # constants
 
 NUM_BATCHES = int(1e4)
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 GRADIENT_ACCUMULATE_EVERY = 4
 LEARNING_RATE = 3e-4
 VALIDATE_EVERY = 100
@@ -25,7 +27,7 @@ SEQ_LEN = 192
 use_rotary = True
 sf_dropout = False
 
-hierarchy = (1, 2, 1)
+hierarchy = (1, 4, 1)
 shorten_factor = 3
 d_model = 512
 n_heads = 8
@@ -123,33 +125,41 @@ if __name__ == '__main__':
 
     optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+    min_sf, max_sf = (2, 3)
+    min_eval_sf, max_eval_sf = (2, 3)
     # training
-
+    train_losses = defaultdict(list)
     for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
         model.train()
 
         for __ in range(GRADIENT_ACCUMULATE_EVERY):
-            loss = model(next(train_loader))
+            sf = np.random.randint(min_sf, max_sf + 1)
+            loss = model(next(train_loader), sf=sf)
             loss.backward()
+            train_losses[sf].append(loss.item())
 
         if i % 50 == 0:
-            print(f'training loss: {loss.item()}')
-            if USE_NEPTUNE:
-                run['train/loss'].log(step=i, value=loss.item())
+            for sf, losses in train_losses.items():
+                avg_loss = np.array(losses).mean()
+                print(f'training loss, sf={sf}: {avg_loss}')
+                if USE_NEPTUNE:
+                    run[f'train/loss_sf_{sf}'].log(step=i, value=avg_loss)
+            train_losses = defaultdict(list)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optim.step()
         optim.zero_grad()
 
         if i % VALIDATE_EVERY == 0:
-            val_losses = []
-            for val_batch in val_loader:
-                loss = model(val_batch)
-                val_losses.append(loss.item())
-            val_loss = np.mean(np.array(val_losses))
-            print(f'validation loss: {val_loss}')
-            if USE_NEPTUNE:
-                run['val/loss'].log(step=i, value=val_loss)
+            for sf in range(min_eval_sf, max_eval_sf+1):
+                val_losses = []
+                for val_batch in val_loader:
+                    loss = model(val_batch, sf=sf)
+                    val_losses.append(loss.item())
+                val_loss = np.mean(np.array(val_losses))
+                print(f'validation loss for sf={sf}: {val_loss}')
+                if USE_NEPTUNE:
+                    run[f'val/loss_sf_{sf}'].log(step=i, value=val_loss)
 
         if i % GENERATE_EVERY == 0:
             model.eval()

@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import torch
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from torch import nn, einsum
@@ -62,8 +64,8 @@ class NaiveDownsample(nn.Module):
         super().__init__()
         self.shorten_factor = shorten_factor
 
-    def forward(self, x):
-        return reduce(x, 'b (n s) d -> b n d', 'mean', s=self.shorten_factor)
+    def forward(self, x, sf=None):
+        return reduce(x, 'b (n s) d -> b n d', 'mean', s=sf)
 
 
 class NaiveUpsample(nn.Module):
@@ -71,8 +73,8 @@ class NaiveUpsample(nn.Module):
         super().__init__()
         self.shorten_factor = shorten_factor
 
-    def forward(self, x):
-        return repeat(x, 'b n d -> b (n s) d', s=self.shorten_factor)
+    def forward(self, x, sf=None):
+        return repeat(x, 'b n d -> b (n s) d', s=sf)
 
 
 class LinearDownsample(nn.Module):
@@ -125,7 +127,7 @@ class Attention(nn.Module):
         self.use_rotary = use_rotary
         if self.use_rotary:
             self.pos_emb = RotaryEmbedding(dim=dim_head)
-            self.rotary_freqs = None
+            self.rotary_freqs = {}
         self.scale = dim_head ** -0.5
         inner_dim = heads * dim_head
 
@@ -145,12 +147,16 @@ class Attention(nn.Module):
         q = q * self.scale
 
         if self.use_rotary:
-            if self.rotary_freqs is None:
-                seq_len = q.shape[2]
-                self.rotary_freqs = self.pos_emb(torch.arange(seq_len).cuda())
-            freqs = self.rotary_freqs[None, ...]
-            q = apply_rotary_emb(freqs, q)
-            k = apply_rotary_emb(freqs, k)
+            seq_len = q.shape[2]
+            if seq_len not in self.rotary_freqs:
+                self.rotary_freqs[seq_len] =\
+                    self.pos_emb(torch.arange(seq_len).cuda())
+            freqs = self.rotary_freqs[seq_len][None, ...]
+
+            if q.shape[2] == k.shape[2]:
+                # Do not inject positional information in attention resampling
+                q = apply_rotary_emb(freqs, q)
+                k = apply_rotary_emb(freqs, k)
 
         sim = einsum('b h i d, b h j d -> b h i j', q, k)
         mask_value = -torch.finfo(sim.dtype).max
@@ -292,10 +298,10 @@ class HourglassTransformer(nn.Module):
                                             causal=causal, **transformer_kwargs)
         self.norm_out = nn.LayerNorm(dim) if norm_out else nn.Identity()
 
-    def forward(self, x, mask=None):
+    def forward(self, x, sf=None, mask=None):
         # b : batch, n : sequence length, d : feature dimension, s : shortening factor
-
-        s, b, n = self.shorten_factor, *x.shape[:2]
+        s = sf or self.shorten_factor
+        b, n = x.shape[:2]
 
         # top half of hourglass, pre-transformer layers
 
@@ -323,7 +329,7 @@ class HourglassTransformer(nn.Module):
 
         # naive average pool
 
-        downsampled = self.downsample(x)
+        downsampled = self.downsample(x, sf=s)
 
         if exists(mask):
             downsampled_mask = reduce(padded_mask, 'b (n s) -> b n', 'sum',
@@ -356,7 +362,7 @@ class HourglassTransformer(nn.Module):
 
         # naive repeat upsample
 
-        x = self.upsample(x)
+        x = self.upsample(x, sf=s)
 
         # add the residual
 
@@ -423,12 +429,12 @@ class HourglassTransformerLM(nn.Module):
 
         self.to_logits = nn.Linear(dim, num_tokens)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, sf=None, mask=None):
         device = x.device
         x = self.token_emb(x)
         if not self.use_rotary:
             pos_emb = self.pos_emb(torch.arange(x.shape[-2], device=device))
             x = x + rearrange(pos_emb, 'n d -> () n d')
 
-        x = self.transformer(x, mask=mask)
+        x = self.transformer(x, sf=sf, mask=mask)
         return self.to_logits(x)
