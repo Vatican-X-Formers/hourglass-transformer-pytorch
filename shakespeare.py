@@ -2,6 +2,7 @@ from hourglass_transformer_pytorch import HourglassTransformerLM
 from hourglass_transformer_pytorch.autoregressive_wrapper import \
     AutoregressiveWrapper
 
+import os
 import random
 import tqdm
 import tensorflow_datasets as tfds
@@ -9,18 +10,49 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+import neptune.new as neptune
+
 # constants
 
-NUM_BATCHES = int(1e5)
-BATCH_SIZE = 8
-GRADIENT_ACCUMULATE_EVERY = 2
-LEARNING_RATE = 2e-4
+NUM_BATCHES = int(1e4)
+BATCH_SIZE = 4
+GRADIENT_ACCUMULATE_EVERY = 4
+LEARNING_RATE = 3e-4
 VALIDATE_EVERY = 100
-GENERATE_EVERY = 500
-GENERATE_LENGTH = 512
+GENERATE_EVERY = 1000
+GENERATE_LENGTH = 192
 SEQ_LEN = 192
+VAL_STEPS = 30
+sf_dropout = False
 
+hierarchy = (1, 2, 1)
+shorten_factor = 3
+d_model = 512
+n_heads = 8
+attn_resampling = False
 
+USE_NEPTUNE = False
+
+if USE_NEPTUNE:
+    run = neptune.init(
+        project=os.environ['NEPTUNE_PROJECT'],
+        api_token=os.environ['NEPTUNE_TOKEN'],
+    )  # your credentials
+
+params = {"bs": BATCH_SIZE,
+          "grad_acc": GRADIENT_ACCUMULATE_EVERY,
+          "val_steps": VAL_STEPS,
+          "lr": LEARNING_RATE,
+          "seq_len": SEQ_LEN,
+          "model_hierarchy": hierarchy,
+          "shorten_factor": shorten_factor,
+          "d_model": d_model,
+          "n_heads": n_heads,
+          "attn_resampling": attn_resampling,
+          "sf_dropout": sf_dropout}
+
+if USE_NEPTUNE:
+    run["parameters"] = params
 # helpers
 
 def cycle(loader):
@@ -41,12 +73,12 @@ if __name__ == '__main__':
     # instantiate GPT-like decoder model
     model = HourglassTransformerLM(
         num_tokens=256,
-        dim=512,
+        dim=d_model,
         max_seq_len=SEQ_LEN,
-        depth=(1, 2, 1),
-        shorten_factor=3,
-        heads=8,
-        attn_resampling=False
+        depth=hierarchy,
+        shorten_factor=shorten_factor,
+        heads=n_heads,
+        attn_resampling=attn_resampling,
     )
 
     model = AutoregressiveWrapper(model)
@@ -99,16 +131,24 @@ if __name__ == '__main__':
             loss = model(next(train_loader))
             loss.backward()
 
+        if i % 50 == 0:
+            print(f'training loss: {loss.item()}')
+            if USE_NEPTUNE:
+                run['train/loss'].log(step=i, value=loss.item())
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optim.step()
         optim.zero_grad()
 
         if i % VALIDATE_EVERY == 0:
-            print(f'training loss: {loss.item()}')
-            model.eval()
-            with torch.no_grad():
+            val_losses = []
+            for _ in range(VAL_STEPS):
                 loss = model(next(val_loader))
-                print(f'validation loss: {loss.item()}')
+                val_losses.append(loss.item())
+            val_loss = np.mean(np.array(val_losses))
+            print(f'validation loss: {val_loss}')
+            if USE_NEPTUNE:
+                run['val/loss'].log(step=i, value=val_loss)
 
         if i % GENERATE_EVERY == 0:
             model.eval()
