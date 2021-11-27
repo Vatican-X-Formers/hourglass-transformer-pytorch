@@ -68,6 +68,28 @@ class NaiveDownsample(nn.Module):
         return reduce(x, 'b (n s) d -> b n d', 'mean', s=sf)
 
 
+class AttentionDownsample(nn.Module):
+    def __init__(self, **transformer_kwargs):
+        super().__init__()
+        self.transformer_block = Transformer(depth=1, causal=True,
+                                             **transformer_kwargs)
+
+    def forward(self, x, sf=None):
+        pooled_x = reduce(x, 'b (n s) d -> b n d', 'mean', s=sf)
+        return self.transformer_block(pooled_x, context=x)
+
+
+class AttentionUpsample(nn.Module):
+    def __init__(self, **transformer_kwargs):
+        super().__init__()
+        self.transformer_block = Transformer(depth=1, causal=True,
+                                             **transformer_kwargs)
+
+    def forward(self, x, residual_x=None, sf=None):
+        upsampled_x = repeat(x, 'b n d -> b (n s) d', s=sf)
+        return self.transformer_block(upsampled_x + residual_x, context=x)
+
+
 class NaiveUpsample(nn.Module):
     def __init__(self, shorten_factor):
         super().__init__()
@@ -137,6 +159,19 @@ class Attention(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+    @staticmethod
+    def create_mask(q_len, k_len, device):
+        shorter_len = min(q_len, k_len)
+        longer_len = max(q_len, k_len)
+        sf = longer_len // shorter_len
+
+        mask = torch.ones(shorter_len, shorter_len, dtype=torch.bool,
+                          device=device).tril_()
+        mask = torch.repeat_interleave(mask, repeats=sf, dim=-1)
+        if q_len > k_len:
+            mask = torch.flip(mask.T, dims=[0, 1])
+        return mask
+
     def forward(self, x, context=None, mask=None):
         h, device = self.heads, x.device
         kv_input = default(context, x)
@@ -146,17 +181,16 @@ class Attention(nn.Module):
                       (q, k, v))
         q = q * self.scale
 
-        if self.use_rotary:
+        if self.use_rotary and q.shape[2] == k.shape[2]:
             seq_len = q.shape[2]
             if seq_len not in self.rotary_freqs:
-                self.rotary_freqs[seq_len] =\
+                self.rotary_freqs[seq_len] = \
                     self.pos_emb(torch.arange(seq_len).cuda())
             freqs = self.rotary_freqs[seq_len][None, ...]
 
-            if q.shape[2] == k.shape[2]:
-                # Do not inject positional information in attention resampling
-                q = apply_rotary_emb(freqs, q)
-                k = apply_rotary_emb(freqs, k)
+            # Do not inject positional information in attention resampling
+            q = apply_rotary_emb(freqs, q)
+            k = apply_rotary_emb(freqs, k)
 
         sim = einsum('b h i d, b h j d -> b h i j', q, k)
         mask_value = -torch.finfo(sim.dtype).max
@@ -166,9 +200,12 @@ class Attention(nn.Module):
             sim = sim.masked_fill(~mask, mask_value)
 
         if self.causal:
-            i, j = sim.shape[-2:]
-            mask = torch.ones(i, j, device=device, dtype=torch.bool).triu_(
-                j - i + 1)
+            if q.shape[2] != k.shape[2]:
+                mask = ~self.create_mask(q.shape[2], k.shape[2], device)
+            else:
+                i, j = sim.shape[-2:]
+                mask = torch.ones(i, j, device=device, dtype=torch.bool).triu_(
+                    j - i + 1)
             mask = rearrange(mask, 'i j -> () () i j')
             sim = sim.masked_fill(mask, mask_value)
 
@@ -267,8 +304,12 @@ class HourglassTransformer(nn.Module):
 
         self.causal = causal
         self.shorten_factor = shorten_factor
+        self.attn_resampling = attn_resampling
 
-        if updown_sample_type == 'naive':
+        if attn_resampling:
+            self.downsample = AttentionDownsample(**transformer_kwargs)
+            self.upsample = AttentionUpsample(**transformer_kwargs)
+        elif updown_sample_type == 'naive':
             self.downsample = NaiveDownsample(shorten_factor)
             self.upsample = NaiveUpsample(shorten_factor)
         elif updown_sample_type == 'linear':
@@ -286,11 +327,6 @@ class HourglassTransformer(nn.Module):
             causal=causal,
             **transformer_kwargs
         )
-
-        self.attn_resampling_pre_valley = Transformer(depth=1,
-                                                      **transformer_kwargs) if attn_resampling else None
-        self.attn_resampling_post_valley = Transformer(depth=1,
-                                                       **transformer_kwargs) if attn_resampling else None
 
         self.pre_transformer = Transformer(depth=pre_layers_depth,
                                            causal=causal, **transformer_kwargs)
@@ -337,47 +373,18 @@ class HourglassTransformer(nn.Module):
         else:
             downsampled_mask = None
 
-        # pre-valley "attention resampling" - they have the pooled token in each bucket attend to the tokens pre-pooled
-
-        if exists(self.attn_resampling_pre_valley):
-            if exists(mask):
-                attn_resampling_mask = rearrange(padded_mask,
-                                                 'b (n s) -> (b n) s', s=s)
-            else:
-                attn_resampling_mask = None
-
-            downsampled = self.attn_resampling_pre_valley(
-                rearrange(downsampled, 'b n d -> (b n) () d'),
-                rearrange(x, 'b (n s) d -> (b n) s d', s=s),
-                mask=attn_resampling_mask
-            )
-
-            downsampled = rearrange(downsampled, '(b n) () d -> b n d', b=b)
-
         # the "valley" - either a regular transformer or another hourglass
 
         x = self.valley_transformer(downsampled, mask=downsampled_mask)
 
-        valley_out = x.clone()
-
         # naive repeat upsample
-
-        x = self.upsample(x, sf=s)
-
+        if self.attn_resampling:
+            x = self.upsample(x, residual_x=x_residual, sf=s)
+        else:
+            x = self.upsample(x, sf=s)
         # add the residual
 
         x = x + x_residual
-
-        # post-valley "attention resampling"
-
-        if exists(self.attn_resampling_post_valley):
-            x = self.attn_resampling_post_valley(
-                rearrange(x, 'b (n s) d -> (b n) s d', s=s),
-                rearrange(valley_out, 'b n d -> (b n) () d')
-            )
-
-            x = rearrange(x, '(b n) s d -> b (n s) d', b=b)
-
         # bring sequence back to original length, if it were padded for pooling
 
         x = x[:, :n]

@@ -16,8 +16,8 @@ import neptune.new as neptune
 
 # constants
 
-NUM_BATCHES = int(1e4)
-BATCH_SIZE = 1
+NUM_BATCHES = 5000
+BATCH_SIZE = 4
 GRADIENT_ACCUMULATE_EVERY = 4
 LEARNING_RATE = 3e-4
 VALIDATE_EVERY = 100
@@ -31,9 +31,9 @@ hierarchy = (1, 4, 1)
 shorten_factor = 3
 d_model = 512
 n_heads = 8
-attn_resampling = False
+attn_resampling = True
 
-USE_NEPTUNE = False
+USE_NEPTUNE = True
 
 if USE_NEPTUNE:
     run = neptune.init(
@@ -125,8 +125,8 @@ if __name__ == '__main__':
 
     optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    min_sf, max_sf = (2, 3)
-    min_eval_sf, max_eval_sf = (2, 3)
+    min_sf, max_sf = (2, 2)
+    min_eval_sf, max_eval_sf = (2, 2)
     # training
     train_losses = defaultdict(list)
     for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
